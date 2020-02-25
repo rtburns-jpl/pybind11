@@ -5,33 +5,31 @@
 # All rights reserved. Use of this source code is governed by a
 # BSD-style license that can be found in the LICENSE file.
 
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.12)
 
 # Add a CMake parameter for choosing a desired Python version
 if(NOT PYBIND11_PYTHON_VERSION)
   set(PYBIND11_PYTHON_VERSION "" CACHE STRING "Python version to use for compiling modules")
 endif()
 
-set(Python_ADDITIONAL_VERSIONS 3.8 3.7 3.6 3.5 3.4)
-find_package(PythonLibsNew ${PYBIND11_PYTHON_VERSION} REQUIRED)
+find_package(Python 3.6 REQUIRED COMPONENTS Development)
+
+execute_process(COMMAND "${Python_EXECUTABLE}" "-c"
+    "import sys; print(hasattr(sys, 'gettotalrefcount')+0);"
+    RESULT_VARIABLE _PYTHON_SUCCESS
+    OUTPUT_VARIABLE Python_IS_DEBUG
+    ERROR_VARIABLE _PYTHON_ERROR_VALUE)
+
+if(NOT _PYTHON_SUCCESS MATCHES 0)
+    message(FATAL_ERROR "Python config failure:\n${_PYTHON_ERROR_VALUE}")
+endif()
 
 include(CheckCXXCompilerFlag)
 include(CMakeParseArguments)
 
 if(NOT PYBIND11_CPP_STANDARD AND NOT CMAKE_CXX_STANDARD)
   if(NOT MSVC)
-    check_cxx_compiler_flag("-std=c++14" HAS_CPP14_FLAG)
-
-    if (HAS_CPP14_FLAG)
-      set(PYBIND11_CPP_STANDARD -std=c++14)
-    else()
-      check_cxx_compiler_flag("-std=c++11" HAS_CPP11_FLAG)
-      if (HAS_CPP11_FLAG)
-        set(PYBIND11_CPP_STANDARD -std=c++11)
-      else()
-        message(FATAL_ERROR "Unsupported compiler -- pybind11 requires C++11 support!")
-      endif()
-    endif()
+    set(PYBIND11_CPP_STANDARD -std=c++14)
   elseif(MSVC)
     set(PYBIND11_CPP_STANDARD /std:c++14)
   endif()
@@ -109,26 +107,18 @@ function(_pybind11_add_lto_flags target_name prefer_thin_lto)
 endfunction()
 
 # Build a Python extension module:
-# pybind11_add_module(<name> [MODULE | SHARED] [EXCLUDE_FROM_ALL]
+# pybind11_add_module(<name> [EXCLUDE_FROM_ALL]
 #                     [NO_EXTRAS] [SYSTEM] [THIN_LTO] source1 [source2 ...])
 #
 function(pybind11_add_module target_name)
-  set(options MODULE SHARED EXCLUDE_FROM_ALL NO_EXTRAS SYSTEM THIN_LTO)
+  set(options EXCLUDE_FROM_ALL NO_EXTRAS SYSTEM THIN_LTO)
   cmake_parse_arguments(ARG "${options}" "" "" ${ARGN})
-
-  if(ARG_MODULE AND ARG_SHARED)
-    message(FATAL_ERROR "Can't be both MODULE and SHARED")
-  elseif(ARG_SHARED)
-    set(lib_type SHARED)
-  else()
-    set(lib_type MODULE)
-  endif()
 
   if(ARG_EXCLUDE_FROM_ALL)
     set(exclude_from_all EXCLUDE_FROM_ALL)
   endif()
 
-  add_library(${target_name} ${lib_type} ${exclude_from_all} ${ARG_UNPARSED_ARGUMENTS})
+  Python_add_library(${target_name} MODULE ${exclude_from_all} ${ARG_UNPARSED_ARGUMENTS})
 
   if(ARG_SYSTEM)
     set(inc_isystem SYSTEM)
@@ -136,19 +126,14 @@ function(pybind11_add_module target_name)
 
   target_include_directories(${target_name} ${inc_isystem}
     PRIVATE ${PYBIND11_INCLUDE_DIR}  # from project CMakeLists.txt
-    PRIVATE ${pybind11_INCLUDE_DIR}  # from pybind11Config
-    PRIVATE ${PYTHON_INCLUDE_DIRS})
+    )
 
   # Python debug libraries expose slightly different objects
   # https://docs.python.org/3.6/c-api/intro.html#debugging-builds
   # https://stackoverflow.com/questions/39161202/how-to-work-around-missing-pymodule-create2-in-amd64-win-python35-d-lib
-  if(PYTHON_IS_DEBUG)
+  if(Python_IS_DEBUG)
     target_compile_definitions(${target_name} PRIVATE Py_DEBUG)
   endif()
-
-  # The prefix and extension are provided by FindPythonLibsNew.cmake
-  set_target_properties(${target_name} PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}")
-  set_target_properties(${target_name} PROPERTIES SUFFIX "${PYTHON_MODULE_EXTENSION}")
 
   # -fvisibility=hidden is required to allow multiple modules compiled against
   # different pybind versions to work properly, and for some features (e.g.
@@ -158,10 +143,7 @@ function(pybind11_add_module target_name)
   set_target_properties(${target_name} PROPERTIES CXX_VISIBILITY_PRESET "hidden")
   set_target_properties(${target_name} PROPERTIES CUDA_VISIBILITY_PRESET "hidden")
 
-  if(WIN32 OR CYGWIN)
-    # Link against the Python shared library on Windows
-    target_link_libraries(${target_name} PRIVATE ${PYTHON_LIBRARIES})
-  elseif(APPLE)
+  if(APPLE)
     # It's quite common to have multiple copies of the same Python version
     # installed on one's system. E.g.: one copy from the OS and another copy
     # that's statically linked into an application like Blender or Maya.
@@ -176,7 +158,11 @@ function(pybind11_add_module target_name)
     # missing symbols, but that's perfectly fine -- they will be resolved at
     # import time.
 
-    target_link_libraries(${target_name} PRIVATE "-undefined dynamic_lookup")
+    if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.13)
+      target_link_options(${target_name} PRIVATE -undefined dynamic_lookup)
+    else()
+      target_link_libraries(${target_name} PRIVATE "-undefined dynamic_lookup")
+    endif()
 
     if(ARG_SHARED)
       # Suppress CMake >= 3.0 warning for shared libraries
@@ -185,11 +171,7 @@ function(pybind11_add_module target_name)
   endif()
 
   # Make sure C++11/14 are enabled
-  if(CMAKE_VERSION VERSION_LESS 3.3)
-    target_compile_options(${target_name} PUBLIC ${PYBIND11_CPP_STANDARD})
-  else()
-    target_compile_options(${target_name} PUBLIC $<$<COMPILE_LANGUAGE:CXX>:${PYBIND11_CPP_STANDARD}>)
-  endif()
+  target_compile_options(${target_name} PUBLIC $<$<COMPILE_LANGUAGE:CXX>:${PYBIND11_CPP_STANDARD}>)
 
   if(ARG_NO_EXTRAS)
     return()
@@ -214,14 +196,10 @@ function(pybind11_add_module target_name)
     # /MP enables multithreaded builds (relevant when there are many files), /bigobj is
     # needed for bigger binding projects due to the limit to 64k addressable sections
     target_compile_options(${target_name} PRIVATE /bigobj)
-    if(CMAKE_VERSION VERSION_LESS 3.11)
-      target_compile_options(${target_name} PRIVATE $<$<NOT:$<CONFIG:Debug>>:/MP>)
-    else()
-      # Only set these options for C++ files.  This is important so that, for
-      # instance, projects that include other types of source files like CUDA
-      # .cu files don't get these options propagated to nvcc since that would
-      # cause the build to fail.
-      target_compile_options(${target_name} PRIVATE $<$<NOT:$<CONFIG:Debug>>:$<$<COMPILE_LANGUAGE:CXX>:/MP>>)
-    endif()
+    # Only set these options for C++ files.  This is important so that, for
+    # instance, projects that include other types of source files like CUDA
+    # .cu files don't get these options propagated to nvcc since that would
+    # cause the build to fail.
+    target_compile_options(${target_name} PRIVATE $<$<NOT:$<CONFIG:Debug>>:$<$<COMPILE_LANGUAGE:CXX>:/MP>>)
   endif()
 endfunction()
